@@ -60,7 +60,7 @@ func ParseTuicURL(link string) (data *Tuic, err error) {
 		UUID:              u.User.Username(),
 		Password:          u.User.String(),
 		Sni:               u.Query().Get("sni"),
-		AllowInsecure:     u.Query().Get("allow_insecure") == "true" || u.Query().Get("allow_insecure") == "1",
+		AllowInsecure:     u.Query().Get("allow_insecure") == "true" || u.Query().Get("allow_insecure") == "1" || u.Query().Get("insecure") == "true" || u.Query().Get("insecure") == "1" || u.Query().Get("allowInsecure") == "true" || u.Query().Get("allowInsecure") == "1",
 		DisableSni:        u.Query().Get("disable_sni") == "true" || u.Query().Get("disable_sni") == "1",
 		Alpn:              alpn,
 		CongestionControl: u.Query().Get("congestion_control"),
