@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/v2rayA/shadowsocksR/tools/leakybuf"
@@ -37,10 +38,10 @@ type Socks5 struct {
 	user        string
 	password    string
 	TcpListener net.Listener
+	udpSessions sync.Map
 }
 
 func init() {
-	println("[DEBUG] socks5.init called")
 	log.Trace("[socks5] registering server and dialer")
 	plugin.RegisterServer("socks5", NewSocks5Server)
 	plugin.RegisterServer("socks", NewSocks5Server)
@@ -88,7 +89,7 @@ func NewSocks5Server(s string, nodeName string, p plugin.Proxy) (plugin.Server, 
 
 // ListenAndServe serves socks5 requests.
 func (s *Socks5) ListenAndServe() error {
-	//go s.ListenAndServeUDP()
+	go s.ListenAndServeUDP()
 	return s.ListenAndServeTCP()
 }
 
@@ -525,4 +526,72 @@ func (s *Socks5) handshake(rw io.ReadWriter) (socks.Addr, error) {
 	}
 
 	return addr, err // skip VER, CMD, RSV fields
+}
+
+func (s *Socks5) ListenAndServeUDP() error {
+	l, err := net.ListenPacket("udp", s.addr)
+	if err != nil {
+		log.Warn("[socks5] failed to listen UDP on %s: %v", s.addr, err)
+		return err
+	}
+	defer l.Close()
+
+	log.Trace("[socks5] listening UDP on %s", s.addr)
+
+	buf := make([]byte, 65507)
+	for {
+		n, clientAddr, err := l.ReadFrom(buf)
+		if err != nil {
+			if strings.Contains(err.Error(), "use of closed network connection") {
+				return nil
+			}
+			continue
+		}
+		if n < 10 {
+			continue
+		}
+		if buf[0] != 0 || buf[1] != 0 || buf[2] != 0 {
+			continue 
+		}
+		tgtAddr := socks.SplitAddr(buf[3:n])
+		if tgtAddr == nil {
+			continue
+		}
+
+		payload := make([]byte, n-(3+len(tgtAddr)))
+		copy(payload, buf[3+len(tgtAddr):n])
+
+		sessionKey := clientAddr.String()
+		var upstream plugin.FakeNetPacketConn
+		if v, ok := s.udpSessions.Load(sessionKey); ok {
+			upstream = v.(plugin.FakeNetPacketConn)
+		} else {
+			log.Trace("[socks5] New UDP association for %s to %s", clientAddr, tgtAddr)
+			var err error
+			upstream, _, err = s.proxy.DialUDP("udp")
+			if err != nil {
+				log.Warn("[socks5] failed to dial UDP upstream: %v", err)
+				continue
+			}
+			s.udpSessions.Store(sessionKey, upstream)
+			go func(cAddr net.Addr, up plugin.FakeNetPacketConn, key string) {
+				defer up.Close()
+				defer s.udpSessions.Delete(key)
+				rBuf := make([]byte, 65507)
+				for {
+					rn, rAddr, err := up.ReadFrom(rBuf)
+					if err != nil {
+						return
+					}
+					sAddr := socks.ParseAddr(rAddr.String())
+					header := append([]byte{0, 0, 0}, sAddr...)
+					reply := append(header, rBuf[:rn]...)
+					l.WriteTo(reply, cAddr)
+				}
+			}(clientAddr, upstream, sessionKey)
+		}
+
+		targetUDPAddr, _ := net.ResolveUDPAddr("udp", tgtAddr.String())
+		upstream.WriteTo(payload, targetUDPAddr)
+	}
 }

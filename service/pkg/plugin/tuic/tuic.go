@@ -70,7 +70,8 @@ func (s *Tuic) DialUDP(network string) (plugin.FakeNetPacketConn, error) {
 		Network: "udp",
 		Mark:    plugin.ShouldSetMark(),
 	}
-	rc, err := s.dialer.DialContext(context.TODO(), magicNetwork.Encode(), "")
+	// Use a dummy address to avoid "missing port in address" error from net.SplitHostPort
+	rc, err := s.dialer.DialContext(context.TODO(), magicNetwork.Encode(), "0.0.0.0:0")
 	if err != nil {
 		return nil, fmt.Errorf("[tuic]: dial udp %w", err)
 	}
