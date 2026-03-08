@@ -116,10 +116,18 @@ type Settings struct {
 	Servers        interface{} `json:"servers,omitempty"`
 	DomainStrategy string      `json:"domainStrategy,omitempty"`
 	Port           int         `json:"port,omitempty"`
-	Address        string      `json:"address,omitempty"`
+	Address        interface{} `json:"address,omitempty"`
 	Network        string      `json:"network,omitempty"`
 	Redirect       string      `json:"redirect,omitempty"`
 	UserLevel      *int        `json:"userLevel,omitempty"`
+
+	// Wireguard specific
+	SecretKey  string      `json:"secretKey,omitempty"`
+	Peers      interface{} `json:"peers,omitempty"`
+	MTU        int         `json:"mtu,omitempty"`
+	Reserved   []uint8     `json:"reserved,omitempty"`
+	Workers     int         `json:"workers,omitempty"`
+	NoKernelTun bool        `json:"noKernelTun,omitempty"`
 }
 type TLSSettings struct {
 	AllowInsecure                    bool          `json:"allowInsecure"`

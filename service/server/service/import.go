@@ -31,6 +31,16 @@ func Import(url string, which *configure.Which) (err error) {
 	log.Trace("Import: received url=%v, which=%+v", url, which)
 	resolv.CheckResolvConf()
 	url = strings.TrimSpace(url)
+	
+	if strings.HasPrefix(url, "[Interface]") || strings.Contains(url, "[Interface]") {
+		log.Info("Import: detected WireGuard configuration")
+		if obj, e := serverObj.ParseWireguardConf(url); e == nil {
+			return configure.AppendServers([]*configure.ServerRaw{{ServerObj: obj}})
+		} else {
+			return fmt.Errorf("failed to parse wireguard conf: %w", e)
+		}
+	}
+	
 	if lines := strings.Split(url, "\n"); len(lines) >= 2 || strings.HasPrefix(url, "{") {
 		infos, _, err := ResolveByLines(url)
 		if err != nil {
@@ -43,7 +53,7 @@ func Import(url string, which *configure.Which) (err error) {
 	}
 	supportedPrefix := []string{"vmess", "vless", "ss", "ssr", "trojan", "trojan-go", "http-proxy",
 		"https-proxy", "socks5", "http2", "juicity", "tuic", "hysteria", "hysteria2", "anytls",
-		"shadowsocks", "shadowsocksr", "hy1", "hy2", "mcore", "mcp", "plugin"}
+		"shadowsocks", "shadowsocksr", "hy1", "hy2", "mcore", "mcp", "plugin", "wg", "wireguard"}
 	for i := range supportedPrefix {
 		supportedPrefix[i] += "://"
 	}

@@ -748,6 +748,39 @@ ref="v2ray_key" v-model="v2ray.key" :placeholder="$t('configureServer.password')
             </b-select>
           </b-field>
         </b-tab-item>
+
+        <b-tab-item label="Wireguard">
+          <b-field label="Name" label-position="on-border">
+            <b-input ref="wireguard_name" v-model="wireguard.name" :placeholder="$t('configureServer.servername')" expanded />
+          </b-field>
+          <b-field label="Endpoint Host" label-position="on-border">
+            <b-input ref="wireguard_server" v-model="wireguard.server" required placeholder="IP / HOST" expanded />
+          </b-field>
+          <b-field label="Endpoint Port" label-position="on-border">
+            <b-input ref="wireguard_port" v-model="wireguard.port" required :placeholder="$t('configureServer.port')" type="number" expanded />
+          </b-field>
+          <b-field label="Public Key (Peer)" label-position="on-border">
+            <b-input ref="wireguard_peerPubKey" v-model="wireguard.peerPubKey" required placeholder="Public Key" expanded />
+          </b-field>
+          <b-field label="Private Key (Interface)" label-position="on-border">
+            <b-input ref="wireguard_secretKey" v-model="wireguard.secretKey" required placeholder="Private Key" expanded />
+          </b-field>
+          <b-field label="Local Address" label-position="on-border">
+            <b-input ref="wireguard_localAddress" v-model="wireguard.localAddress" required placeholder="e.g. 10.0.0.2/32, fc00::2/128" expanded />
+          </b-field>
+          <b-field label="PreShared Key" label-position="on-border">
+            <b-input ref="wireguard_preSharedKey" v-model="wireguard.preSharedKey" placeholder="(Optional)" expanded />
+          </b-field>
+          <b-field label="KeepAlive" label-position="on-border">
+            <b-input ref="wireguard_keepAlive" v-model="wireguard.keepAlive" placeholder="e.g. 25" type="number" expanded />
+          </b-field>
+          <b-field label="MTU" label-position="on-border">
+            <b-input ref="wireguard_mtu" v-model="wireguard.mtu" placeholder="e.g. 1420" type="number" expanded />
+          </b-field>
+          <b-field label="Reserved" label-position="on-border">
+            <b-input ref="wireguard_reserved" v-model="wireguard.reserved" placeholder="e.g. 0,0,0 (Optional)" expanded />
+          </b-field>
+        </b-tab-item>
       </b-tabs>
     </section>
     <footer v-if="!readonly" class="modal-card-foot flex-end">
@@ -912,6 +945,19 @@ export default {
       allowInsecure: false,
       protocol: "anytls",
     },
+    wireguard: {
+      name: "",
+      server: "",
+      port: "",
+      peerPubKey: "",
+      secretKey: "",
+      localAddress: "",
+      preSharedKey: "",
+      keepAlive: "",
+      mtu: "",
+      reserved: "",
+      protocol: "wireguard",
+    },
     tabChoice: 0,
   }),
   mounted() {
@@ -982,6 +1028,12 @@ export default {
           ) {
             this.anytls = this.resolveURL(res.data.data.sharingAddress);
             this.tabChoice = 9;
+          } else if (
+            res.data.data.sharingAddress.toLowerCase().startsWith("wireguard://") ||
+            res.data.data.sharingAddress.toLowerCase().startsWith("wg://")
+          ) {
+            this.wireguard = this.resolveURL(res.data.data.sharingAddress);
+            this.tabChoice = 10;
           }
           this.$nextTick(() => {
             if (this.readonly) {
@@ -1217,6 +1269,28 @@ export default {
           sni: sni,
           allowInsecure: allowInsecure,
           protocol: "anytls",
+        };
+      } else if (url.toLowerCase().startsWith("wireguard://") || url.toLowerCase().startsWith("wg://")) {
+        let u = parseURL(url);
+        let peerPubKey = u.username;
+        if (!peerPubKey) {
+          peerPubKey = u.params.publicKey ? decodeURIComponent(u.params.publicKey) : "";
+        } else {
+          peerPubKey = decodeURIComponent(peerPubKey);
+        }
+        let secretKey = u.params.secretKey || u.params.privateKey || "";
+        return {
+          name: decodeURIComponent(u.hash) || u.params.name || "",
+          server: u.host,
+          port: u.port,
+          peerPubKey: peerPubKey,
+          secretKey: secretKey,
+          localAddress: u.params.address || "",
+          preSharedKey: u.params.psk || "",
+          keepAlive: u.params.keepAlive || "",
+          mtu: u.params.mtu || "",
+          reserved: u.params.reserved || "",
+          protocol: "wireguard",
         };
       }
       return null;
@@ -1549,6 +1623,9 @@ export default {
         if (this.tabChoice === 9 && !k.startsWith("anytls_")) {
           continue;
         }
+        if (this.tabChoice === 10 && !k.startsWith("wireguard_")) {
+          continue;
+        }
         let x = this.$refs[k];
         if (!x) {
           continue;
@@ -1676,6 +1753,20 @@ export default {
         let url = `anytls://${encodeURIComponent(auth)}@${host}:${port}`;
         if (params.length) url += `?${params.join("&")}`;
         if (name) url += `#${encodeURIComponent(name)}`;
+        coded = url;
+      } else if (this.tabChoice === 10) {
+        // wireguard://peerPubKey@server:port?name=...&...
+        const { server, port, peerPubKey, secretKey, localAddress, preSharedKey, keepAlive, mtu, reserved, name } = this.wireguard;
+        let params = [];
+        if (name) params.push(`name=${encodeURIComponent(name)}`);
+        if (secretKey) params.push(`secretKey=${encodeURIComponent(secretKey)}`);
+        if (localAddress) params.push(`address=${encodeURIComponent(localAddress)}`);
+        if (preSharedKey) params.push(`psk=${encodeURIComponent(preSharedKey)}`);
+        if (keepAlive !== undefined && keepAlive !== "") params.push(`keepAlive=${encodeURIComponent(keepAlive)}`);
+        if (mtu !== undefined && mtu !== "") params.push(`mtu=${encodeURIComponent(mtu)}`);
+        if (reserved) params.push(`reserved=${encodeURIComponent(reserved)}`);
+        let url = `wireguard://${encodeURIComponent(peerPubKey)}@${server}:${port}`;
+        if (params.length) url += `?${params.join("&")}`;
         coded = url;
       }
       this.$emit("submit", coded);
