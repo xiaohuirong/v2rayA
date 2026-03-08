@@ -29,6 +29,12 @@ import (
 // Version is socks5 version number.
 const Version = 5
 
+var bufferPool = sync.Pool{
+	New: func() interface{} {
+		return make([]byte, 32*1024)
+	},
+}
+
 // Socks5 is a base socks5 struct.
 type Socks5 struct {
 	dialer      plugin.Dialer
@@ -194,16 +200,20 @@ func Relay(left, right net.Conn) (int64, int64, error) {
 		N   int64
 		Err error
 	}
-	ch := make(chan res)
+	ch := make(chan res, 1)
 
 	go func() {
-		n, err := io.Copy(right, left)
+		buf := bufferPool.Get().([]byte)
+		defer bufferPool.Put(buf)
+		n, err := io.CopyBuffer(right, left, buf)
 		right.SetDeadline(time.Now()) // wake up the other goroutine blocking on right
 		left.SetDeadline(time.Now())  // wake up the other goroutine blocking on left
 		ch <- res{n, err}
 	}()
 
-	n, err := io.Copy(left, right)
+	buf := bufferPool.Get().([]byte)
+	defer bufferPool.Put(buf)
+	n, err := io.CopyBuffer(left, right, buf)
 	right.SetDeadline(time.Now()) // wake up the other goroutine blocking on right
 	left.SetDeadline(time.Now())  // wake up the other goroutine blocking on left
 	rs := <-ch
@@ -430,7 +440,8 @@ func (s *Socks5) connect(conn net.Conn, target string) error {
 // Handshake fast-tracks SOCKS initialization to get target address to connect.
 func (s *Socks5) handshake(rw io.ReadWriter) (socks.Addr, error) {
 	// Read RFC 1928 for request and reply structure and sizes
-	buf := make([]byte, socks.MaxAddrLen)
+	buf := bufferPool.Get().([]byte)
+	defer bufferPool.Put(buf)
 	// read VER, NMETHODS, METHODS
 	if _, err := io.ReadFull(rw, buf[:2]); err != nil {
 		return nil, err
@@ -511,6 +522,11 @@ func (s *Socks5) handshake(rw io.ReadWriter) (socks.Addr, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// copy address to avoid keep using pooled buffer
+	res := make(socks.Addr, len(addr))
+	copy(res, addr)
+
 	switch cmd {
 	case socks.CmdConnect:
 		// wait for dial success
@@ -525,7 +541,7 @@ func (s *Socks5) handshake(rw io.ReadWriter) (socks.Addr, error) {
 		return nil, socks.Errors[7]
 	}
 
-	return addr, err // skip VER, CMD, RSV fields
+	return res, err // skip VER, CMD, RSV fields
 }
 
 func (s *Socks5) ListenAndServeUDP() error {
@@ -538,7 +554,7 @@ func (s *Socks5) ListenAndServeUDP() error {
 
 	log.Trace("[socks5] listening UDP on %s", s.addr)
 
-	buf := make([]byte, 65507)
+	buf := make([]byte, 65535)
 	for {
 		n, clientAddr, err := l.ReadFrom(buf)
 		if err != nil {
@@ -551,17 +567,28 @@ func (s *Socks5) ListenAndServeUDP() error {
 			continue
 		}
 		if buf[0] != 0 || buf[1] != 0 || buf[2] != 0 {
-			continue 
+			continue
 		}
 		tgtAddr := socks.SplitAddr(buf[3:n])
 		if tgtAddr == nil {
 			continue
 		}
 
-		payload := make([]byte, n-(3+len(tgtAddr)))
-		copy(payload, buf[3+len(tgtAddr):n])
+		payload := buf[3+len(tgtAddr):n]
 
-		sessionKey := clientAddr.String()
+		var sessionKey interface{}
+		if udpAddr, ok := clientAddr.(*net.UDPAddr); ok {
+			var key struct {
+				ip   [16]byte
+				port int
+			}
+			key.port = udpAddr.Port
+			copy(key.ip[:], udpAddr.IP.To16())
+			sessionKey = key
+		} else {
+			sessionKey = clientAddr.String()
+		}
+
 		var upstream plugin.FakeNetPacketConn
 		if v, ok := s.udpSessions.Load(sessionKey); ok {
 			upstream = v.(plugin.FakeNetPacketConn)
@@ -574,19 +601,45 @@ func (s *Socks5) ListenAndServeUDP() error {
 				continue
 			}
 			s.udpSessions.Store(sessionKey, upstream)
-			go func(cAddr net.Addr, up plugin.FakeNetPacketConn, key string) {
+			go func(cAddr net.Addr, up plugin.FakeNetPacketConn, key interface{}) {
 				defer up.Close()
 				defer s.udpSessions.Delete(key)
-				rBuf := make([]byte, 65507)
+				// Max SOCKS5 UDP header is 3(RSV) + 1(ATYP) + 255(DOMAIN) + 2(PORT) = 261 bytes
+				rBuf := make([]byte, 65535)
 				for {
-					rn, rAddr, err := up.ReadFrom(rBuf)
+					rn, rAddr, err := up.ReadFrom(rBuf[262:])
 					if err != nil {
 						return
 					}
-					sAddr := socks.ParseAddr(rAddr.String())
-					header := append([]byte{0, 0, 0}, sAddr...)
-					reply := append(header, rBuf[:rn]...)
-					l.WriteTo(reply, cAddr)
+					var headerLen int
+					if udpAddr, ok := rAddr.(*net.UDPAddr); ok {
+						if ip4 := udpAddr.IP.To4(); ip4 != nil {
+							headerLen = 3 + 1 + net.IPv4len + 2
+							start := 262 - headerLen
+							rBuf[start], rBuf[start+1], rBuf[start+2] = 0, 0, 0
+							rBuf[start+3] = socks.ATypIP4
+							copy(rBuf[start+4:], ip4)
+							rBuf[start+8] = byte(udpAddr.Port >> 8)
+							rBuf[start+9] = byte(udpAddr.Port)
+						} else {
+							headerLen = 3 + 1 + net.IPv6len + 2
+							start := 262 - headerLen
+							rBuf[start], rBuf[start+1], rBuf[start+2] = 0, 0, 0
+							rBuf[start+3] = socks.ATypIP6
+							copy(rBuf[start+4:], udpAddr.IP.To16())
+							rBuf[start+20] = byte(udpAddr.Port >> 8)
+							rBuf[start+21] = byte(udpAddr.Port)
+						}
+					} else {
+						sAddr := socks.ParseAddr(rAddr.String())
+						headerLen = 3 + len(sAddr)
+						start := 262 - headerLen
+						rBuf[start], rBuf[start+1], rBuf[start+2] = 0, 0, 0
+						copy(rBuf[start+3:], sAddr)
+					}
+					
+					start := 262 - headerLen
+					l.WriteTo(rBuf[start:262+rn], cAddr)
 				}
 			}(clientAddr, upstream, sessionKey)
 		}
